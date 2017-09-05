@@ -1,0 +1,29 @@
+<group> volume=-7 key=35 lovel=80 hivel=127
+<region> sample=OH\kick_OH_FF_1.wav lorand=0 hirand=0.08
+<region> sample=OH\kick_OH_FF_2.wav lorand=0.08 hirand=0.16
+<region> sample=OH\kick_OH_FF_3.wav lorand=0.16 hirand=0.24
+
+<group> volume=-12 key=48 lovel=81 hivel=127 off_mode=normal off_by=6
+<region> sample=OH\ride2_OH_FF_1.wav lorand=0 hirand=0.2
+<region> sample=OH\ride2_OH_FF_2.wav lorand=0.2 hirand=0.4
+<region> sample=OH\ride2_OH_FF_3.wav lorand=0.4 hirand=0.6
+<region> sample=OH\ride2_OH_FF_4.wav lorand=0.6 hirand=0.8
+<region> sample=OH\ride2_OH_FF_5.wav lorand=0.8 hirand=1
+
+<group> volume=-29 key=54 group=6
+<region> sample=OH\crash1Choke_OH_F_1.wav 
+
+//Hihat FootStomp
+<group> volume=-20 key=44 lovel=100 hivel=127 group=1
+<region> sample=OH\hihatFootStomp_OH_MP_1.wav lorand=0 hirand=0.25
+<region> sample=OH\hihatFootStomp_OH_MP_2.wav lorand=0.25 hirand=0.5
+<region> sample=OH\hihatFootStomp_OH_MP_3.wav lorand=0.5 hirand=0.75
+<region> sample=OH\hihatFootStomp_OH_MP_4.wav lorand=0.75 hirand=1
+
+//Hihat SemiOpen
+<group> volume=-13 key=42 lovel=64 hivel=127 off_mode=normal locc64=2 hicc64=18 off_by=1
+<region> sample=OH\hihatSemiOpen1_OH_F_1.wav lorand=0 hirand=0.2
+<region> sample=OH\hihatSemiOpen1_OH_F_2.wav lorand=0.2 hirand=0.4
+<region> sample=OH\hihatSemiOpen1_OH_F_3.wav lorand=0.4 hirand=0.6
+<region> sample=OH\hihatSemiOpen1_OH_F_4.wav lorand=0.6 hirand=0.8
+<region> sample=OH\hihatSemiOpen1_OH_F_5.wav lorand=0.8 hirand=1
