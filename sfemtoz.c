@@ -1,14 +1,18 @@
 //==============================================================================
-//=>                         SFemtoZ v1.0.0
+//=>                         SFemtoZ v0.0.2
 //=>                        www.microdrum.net
 //=>                         CC BY-NC-SA 3.0
 //=>
 //=> Massimo Bernava
 //=> massimo.bernava@gmail.com
-//=> 2016-01-07
+//=> 2019-12-04
 //==============================================================================
 
 #define _GNU_SOURCE
+//#include <jack/jack.h>
+//#include <jack/midiport.h>
+//#include <alsa/asoundlib.h> 
+#include "rtmidi_c.h"
 #include <soundio/soundio.h>
 #include <sndfile.h>
 #include <wiringSerial.h>
@@ -20,6 +24,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <math.h>
 
 #define USBPATH "/media/usb/"
 #define MAX_POLYPHONY  50
@@ -31,8 +36,10 @@
 
 typedef struct
 {
-	short *buffer;
+	float *buffer;
 	int size;
+	
+	char* name;
 
 	//List
 	struct snd* next;
@@ -51,6 +58,8 @@ typedef struct
 	char *sample;
 	int volume;
 	int key;
+	int lokey;
+	int hikey;
 	int lovel;
 	int hivel;
 	int off_mode;
@@ -76,6 +85,9 @@ int nregions=0;
 //int lastccvalue=0;
 char cc[127];
 int verbose=FALSE;
+int useusb=FALSE;
+int backend=FALSE;
+unsigned long totMemSamples=0;
 
 //===SOUNDIO=============
 struct SoundIo *soundio;
@@ -83,13 +95,48 @@ struct SoundIoDevice *device;
 struct SoundIoOutStream *outstream;
 //=======================
 
+//===RTMIDI=============
+RtMidiInPtr midiin = NULL;
+//=======================
+
 //========AUDIO CALLBACK=============
+static void (*write_sample)(char *ptr, double sample);
+
+static void write_sample_s16ne(char *ptr, double sample) {
+    int16_t *buf = (int16_t *)ptr;
+    double range = (double)INT16_MAX - (double)INT16_MIN;
+    double val = sample * range / 2.0;
+    *buf = val;
+}
+static void write_sample_s32ne(char *ptr, double sample) {
+    int32_t *buf = (int32_t *)ptr;
+    double range = (double)INT32_MAX - (double)INT32_MIN;
+    double val = sample * range / 2.0;
+    *buf = val;
+}
+static void write_sample_float32ne(char *ptr, double sample) {
+    float *buf = (float *)ptr;
+    *buf = sample;
+}
+static void write_sample_float64ne(char *ptr, double sample) {
+    double *buf = (double *)ptr;
+    *buf = sample;
+}
+
+//static double seconds_offset = 0.0;
+
 static void write_callback(struct SoundIoOutStream *outstream, int frame_count_min, int frame_count_max)
 {
-	int frames_left = FRAME_COUNT;//frame_count_max;
+	int frames_left = frame_count_max;//FRAME_COUNT;
 	//int channels=outstream->layout.channel_count;
 	//printf("min:%i max:%i\n",frame_count_min,frame_count_max);
-
+	
+	/*double PI = 3.14159265358979323846264338328;
+	double float_sample_rate = outstream->sample_rate;
+    double seconds_per_frame = 1.0 / float_sample_rate;
+    double pitch = 440.0;
+    double radians_per_second = pitch * 2.0 * PI;*/
+        
 	int err;
 	struct SoundIoChannelArea *areas;
 
@@ -99,29 +146,38 @@ static void write_callback(struct SoundIoOutStream *outstream, int frame_count_m
 
 		if((err = soundio_outstream_begin_write(outstream,&areas,&frame_count)))
 		{
-			printf("soundio_outstream_begin_write ERROR: %s",soundio_strerror(err));
+			printf("soundio_outstream_begin_write ERROR: %s framecount(%i)\n",soundio_strerror(err),frame_count);
 			exit(1);
 		}
 		if(!frame_count) break;
 
-                for(int frame = 0; frame < frame_count; frame +=1)
-                {
-			int value1=0;
-			int value2=0;
-			int n=0;
+        for(int frame = 0; frame < frame_count; frame +=1)
+        {
+			double value1=0;
+			double value2=0;
+			int n=0; //number of sounds
 			for(int i=0;i<MAX_POLYPHONY;i++)
 			{
 				if(playingsounds[i].sound!=NULL)
 				{
 					n++;
-					value1 += playingsounds[i].sound->buffer[playingsounds[i].pos]*playingsounds[i].volume;
-					value2 += playingsounds[i].sound->buffer[playingsounds[i].pos+1]*playingsounds[i].volume;
+					value1 += playingsounds[i].sound->buffer[playingsounds[i].pos];//*playingsounds[i].volume;
+					value2 += playingsounds[i].sound->buffer[playingsounds[i].pos+1];//*playingsounds[i].volume;
 					playingsounds[i].pos+=2;
 					if(playingsounds[i].pos>=playingsounds[i].sound->size)
 						playingsounds[i].sound=NULL;
 				}
 			}
-			short *ptr1=(short*)(areas[0].ptr + areas[0].step*frame);
+			//double sample = sin((seconds_offset + frame * seconds_per_frame) * radians_per_second);
+            
+            
+			write_sample(areas[0].ptr, value1);
+            areas[0].ptr += areas[0].step;
+            write_sample(areas[1].ptr, value2);
+            areas[1].ptr += areas[1].step;
+            
+            
+			/*short *ptr1=(short*)(areas[0].ptr + areas[0].step*frame);
 			short *ptr2=(short*)(areas[1].ptr + areas[1].step*frame);
 			if(n>0)
 			{
@@ -133,12 +189,14 @@ static void write_callback(struct SoundIoOutStream *outstream, int frame_count_m
 			{
 				*ptr1=0;
 				*ptr2=0;
-			}
+			}*/
 		}
+		//seconds_offset = fmod(seconds_offset + seconds_per_frame * frame_count, 1.0);
+            
 
 		if ((err = soundio_outstream_end_write(outstream)))
 		{
-			printf("soundio_outstream_end_write ERROR: %s",soundio_strerror(err));
+			printf("soundio_outstream_end_write ERROR: %s \n",soundio_strerror(err));
 			exit(1);
 		}
 
@@ -151,15 +209,15 @@ static void write_callback(struct SoundIoOutStream *outstream, int frame_count_m
 //==============================================================================
 void loadBar(int x,int n,int r,int w)
 {
-        if(x % (n/r + 1) != 0 ) return;
-        float ratio = x/(float)n;
-        int c = ratio*w;
+	if(x % (n/r + 1) != 0 ) return;
+    float ratio = x/(float)n;
+    int c = ratio*w;
 
-        printf("%3d%% [", (int)(ratio*100));
-        for(int x=0;x<c;x++) printf("=");
-        for(int x=c;x<w;x++) printf(" ");
+    printf("%3d%% [", (int)(ratio*100));
+    for(int x=0;x<c;x++) printf("=");
+    for(int x=c;x<w;x++) printf(" ");
 
-        printf("]\n\033[F\033[J");
+    printf("]\n\033[F\033[J");
 }
 
 char *trimwhitespace(char *str)
@@ -211,15 +269,18 @@ snd* addsound(char *filename)
 		printf("Channels ERROR!\n");
 		return NULL;
 	}
+	
 	subformat = sfinfo.format & SF_FORMAT_SUBMASK;
 
+	//if(verbose==TRUE) printf("File: %s Format: 0x%08X\n",filename, sfinfo.format);
+	
 	snd* tmp=(snd*)malloc(sizeof(snd));
 
 	tmp->size=sfinfo.frames*sfinfo.channels;
-        tmp->buffer=malloc(tmp->size*sizeof(short));
+        tmp->buffer=malloc(tmp->size*sizeof(float));
 	tmp->next=NULL;
 
-	readcount = sf_read_short(sndfile,tmp->buffer,tmp->size);
+	readcount = /*sf_read_short*/sf_readf_float(sndfile,tmp->buffer,tmp->size);
 
 	if(sounds==NULL)
 	{
@@ -241,18 +302,24 @@ snd* addsound(char *filename)
 void loadsounds()
 {
 	//printf("loadsound\n");
-        sfzreg* r=regions;
+	totMemSamples=0;
+    sfzreg* r=regions;
 	printf("\n");
 	int x=0;
-        while(r!=NULL)
-        {
+    while(r!=NULL)
+    {
 		//TODO evita i duplicati
-                if(r->sample!=NULL) r->sound=addsound(trimwhitespace(r->sample));
-                r=(sfzreg*)r->next;
+        if(r->sample!=NULL) r->sound=addsound(trimwhitespace(r->sample));
+        //printf("Load: %s\n",r->sound);
+        if(r->sound!=NULL) totMemSamples+=r->sound->size*sizeof(float);
+        
+        if((totMemSamples/1000000)>2500) break;
+        
+        r=(sfzreg*)r->next;
 		loadBar(x,nregions,BARRESOLUTION,BARWIDTH);
 		x++;
-        }
-	printf("\n");
+    }
+	printf("TOTMEM: %3d MiB\n",totMemSamples/1000000);
 }
 
 int midiCC(int key,int value)
@@ -268,7 +335,7 @@ int noteOn(int key,int vel)
 
     	while(r!=NULL)
     	{
-	        if(key==r->key &&
+	        if((key==r->key || (key>=r->lokey && key<=r->hikey))&&
 		   r->lovel<=vel && vel<=r->hivel &&
 		   r->lorand<=rnd && rnd<=r->hirand &&
 		   (r->cc==-1 ||  (r->locc<=cc[r->cc] && cc[r->cc]<=r->hicc))
@@ -279,13 +346,93 @@ int noteOn(int key,int vel)
 			playingsounds[playIndex].volume=vel;
 			playIndex=(playIndex+1)%MAX_POLYPHONY;
 			//printf("<region> sample=%s volume=%i key=%i locc%i=%i hicc%i=%i\n",r->sample,r->volume,r->key,r->cc,r->locc,r->cc,r->hicc);
-			if(verbose==TRUE) printf("SOUND: sample=%s key=%i vel=%i rend=%f\n",r->sample,key,vel,rnd);
+			if(verbose==TRUE) printf("SOUND: sample=%s key=%i vel=%i rand=%f\n",r->sample,key,vel,rnd);
 			return 1;
 		}
         	r=(sfzreg*)r->next;
     	}
 	if(verbose==TRUE) printf("NO SOUND: key=%i vel=%i rand=%f\n",key,vel,rnd);
 	return 0;
+}
+
+//==============================================================================
+//   SOUNDIO
+//==============================================================================
+
+static void print_channel_layout(const struct SoundIoChannelLayout *layout) {
+    if (layout->name) {
+        fprintf(stderr, "%s", layout->name);
+    } else {
+        fprintf(stderr, "%s", soundio_get_channel_name(layout->channels[0]));
+        for (int i = 1; i < layout->channel_count; i += 1) {
+            fprintf(stderr, ", %s", soundio_get_channel_name(layout->channels[i]));
+        }
+    }
+}
+
+static void print_device(struct SoundIoDevice *device, bool is_default) {
+    const char *default_str = is_default ? " (default)" : "";
+    const char *raw_str = device->is_raw ? " (raw)" : "";
+    fprintf(stderr, "%s%s%s\n", device->name, default_str, raw_str);
+    //if (short_output)
+     //   return;
+    fprintf(stderr, "  id: %s\n", device->id);
+    if (device->probe_error) {
+        fprintf(stderr, "  probe error: %s\n", soundio_strerror(device->probe_error));
+    } else {
+        fprintf(stderr, "  channel layouts:\n");
+        for (int i = 0; i < device->layout_count; i += 1) {
+            fprintf(stderr, "    ");
+            print_channel_layout(&device->layouts[i]);
+            fprintf(stderr, "\n");
+        }
+        if (device->current_layout.channel_count > 0) {
+            fprintf(stderr, "  current layout: ");
+            print_channel_layout(&device->current_layout);
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "  sample rates:\n");
+        for (int i = 0; i < device->sample_rate_count; i += 1) {
+            struct SoundIoSampleRateRange *range = &device->sample_rates[i];
+            fprintf(stderr, "    %d - %d\n", range->min, range->max);
+        }
+        if (device->sample_rate_current)
+            fprintf(stderr, "  current sample rate: %d\n", device->sample_rate_current);
+        fprintf(stderr, "  formats: ");
+        for (int i = 0; i < device->format_count; i += 1) {
+            const char *comma = (i == device->format_count - 1) ? "" : ", ";
+            fprintf(stderr, "%s%s", soundio_format_string(device->formats[i]), comma);
+        }
+        fprintf(stderr, "\n");
+        if (device->current_format != SoundIoFormatInvalid)
+            fprintf(stderr, "  current format: %s\n", soundio_format_string(device->current_format));
+        fprintf(stderr, "  min software latency: %0.8f sec\n", device->software_latency_min);
+        fprintf(stderr, "  max software latency: %0.8f sec\n", device->software_latency_max);
+        if (device->software_latency_current != 0.0)
+            fprintf(stderr, "  current software latency: %0.8f sec\n", device->software_latency_current);
+    }
+    fprintf(stderr, "\n");
+}
+
+int list_devices(struct SoundIo *soundio) {
+    int output_count = soundio_output_device_count(soundio);
+    int input_count = soundio_input_device_count(soundio);
+    int default_output = soundio_default_output_device_index(soundio);
+    int default_input = soundio_default_input_device_index(soundio);
+    fprintf(stderr, "--------Input Devices--------\n\n");
+    for (int i = 0; i < input_count; i += 1) {
+        struct SoundIoDevice *device = soundio_get_input_device(soundio, i);
+        print_device(device, default_input == i);
+        soundio_device_unref(device);
+    }
+    fprintf(stderr, "\n--------Output Devices--------\n\n");
+    for (int i = 0; i < output_count; i += 1) {
+        struct SoundIoDevice *device = soundio_get_output_device(soundio, i);
+        print_device(device, default_output == i);
+        soundio_device_unref(device);
+    }
+    fprintf(stderr, "\n%d devices found\n", input_count + output_count);
+    return 0;
 }
 
 int configuresoundio()
@@ -299,39 +446,75 @@ int configuresoundio()
 		return 1;
 	}
 
-	//if((err = soundio_connect(soundio)))
-	if((err = soundio_connect_backend(soundio,SoundIoBackendAlsa)))
+	if(backend)
 	{
-		printf("soundio_connect ERROR\n");
+		int count_backend=soundio_backend_count(soundio);
+		enum SoundIoBackend backend[5];
+		for(int index=0;index<count_backend;index++)
+		{
+			backend[index]=soundio_get_backend(soundio,index); 
+			fprintf(stderr, "%i) %s\n",index, soundio_backend_name(backend[index]));
+		}
+		printf("Select backend:");
+		char b=getc(stdin);
+
+		if((err = soundio_connect_backend(soundio,backend[b-'0'])))
+		{
+			fprintf(stderr, "soundio_connect ERROR: %s\n", soundio_strerror(err));
+			return 1;
+		}
+	}
+	else if((err = soundio_connect(soundio)))
+	{
+		fprintf(stderr, "soundio_connect ERROR: %s\n", soundio_strerror(err));
 		return 1;
 	}
 
 	soundio_flush_events(soundio);
 
+	list_devices(soundio);
+
 	int default_out_device_index = soundio_default_output_device_index(soundio);
 	if (default_out_device_index < 0)
 	{
-		printf("soundio_default_output_device_index ERROR!");
+		printf("soundio_default_output_device_index ERROR!\n");
 		return 1;
 	}
 
 	device = soundio_get_output_device(soundio,default_out_device_index);
 	if(!device)
 	{
-		printf("soundio_get_output_device ERROR!");
+		printf("soundio_get_output_device ERROR!\n");
 		return 1;
 	}
 
 	printf("Output device: %s\n",device->name);
 
 	outstream = soundio_outstream_create(device);
-	outstream->format = SoundIoFormatS16NE; //SoundIoFormatFloat32NE;
+	//outstream->format = SoundIoFormatFloat32LE;// SoundIoFormatS16NE; //
 	outstream->write_callback = write_callback;
 	outstream->software_latency = 0.001;
 
+	if (soundio_device_supports_format(device, SoundIoFormatFloat32NE)) {
+        outstream->format = SoundIoFormatFloat32NE;
+        write_sample = write_sample_float32ne;
+    } else if (soundio_device_supports_format(device, SoundIoFormatFloat64NE)) {
+        outstream->format = SoundIoFormatFloat64NE;
+        write_sample = write_sample_float64ne;
+    } else if (soundio_device_supports_format(device, SoundIoFormatS32NE)) {
+        outstream->format = SoundIoFormatS32NE;
+        write_sample = write_sample_s32ne;
+    } else if (soundio_device_supports_format(device, SoundIoFormatS16NE)) {
+        outstream->format = SoundIoFormatS16NE;
+        write_sample = write_sample_s16ne;
+    } else {
+        fprintf(stderr, "No suitable device format available.\n");
+        return 1;
+    }
+    
 	if((err = soundio_outstream_open(outstream)))
 	{
-		printf("sound_outstream_open ERROR!");
+		printf("sound_outstream_open ERROR!\n");
 		return 1;
 	}
 	if(outstream->layout_error)
@@ -339,7 +522,7 @@ int configuresoundio()
 
 	if((err = soundio_outstream_start(outstream)))
 	{
-		printf("soundio_outstrea_start ERROR!");
+		printf("soundio_outstream_start ERROR!\n");
 		return 1;
 	}
 
@@ -359,6 +542,8 @@ sfzreg* addregion(sfzreg *region)
 	nregions++;
 
 	tmp->key=region->key;
+	tmp->lokey=region->lokey;
+	tmp->hikey=region->hikey;
 	tmp->volume=region->volume;
 	tmp->sample=region->sample;
 	tmp->lovel=region->lovel;
@@ -406,6 +591,23 @@ void printsfz()
 		r=(sfzreg*)r->next;
 	}
 }
+
+long int strtomidi(char* str)
+{
+	long int key=strtol(str,NULL,10);
+	if(key==0)
+	{
+		//printf("%s ->",str);
+		long int note=(str[0]-'c')*2;
+		str[0]=' ';
+		if(str[1]=='#') { note++; str[1]=' '; }
+		long int octave=(2+strtol(str,NULL,10))*12;
+		key=note+octave;
+		//printf("%i\n",key);
+	}
+	return key;
+}
+
 void loadsfz(char *filename)
 {
 	FILE *fp;
@@ -427,7 +629,7 @@ void loadsfz(char *filename)
 		//printf("Line: %s",line);
 		char* tmp=line;
 		char* token;
-		while((token = strsep(&tmp," \t"))!=NULL)
+		while((token = strsep(&tmp," \t\r\n"))!=NULL)
 		{
 			if(strlen(token)<3 || (token[0]=='/' && token[1]=='/')) break;
 			//printf("%s\n",token);
@@ -441,8 +643,10 @@ void loadsfz(char *filename)
 				}
 				current_group.volume=0;
 				current_group.key=0;
+				current_group.lokey=0;
+				current_group.hikey=0;
 				current_group.lovel=0;
-				current_group.hivel=0;
+				current_group.hivel=255;
 				current_group.lorand=0;
 				current_group.hirand=1;
 				current_group.group=-1;
@@ -463,6 +667,8 @@ void loadsfz(char *filename)
 				}
 				current_region.volume=current_group.volume;
 				current_region.key=current_group.key;
+				current_region.lokey=current_group.lokey;
+				current_region.hikey=current_group.hikey;
 				current_region.lovel=current_group.lovel;
 				current_region.hivel=current_group.hivel;
 				current_region.lorand=current_group.lorand;
@@ -492,8 +698,24 @@ void loadsfz(char *filename)
 				{
 					switch(currentNode)
 					{
-						case 'g': current_group.key=strtol(value,NULL,10); break;
-						case 'r': current_region.key=strtol(value,NULL,10); break;
+						case 'g': current_group.key=strtomidi(value); break;
+						case 'r': current_region.key=strtomidi(value); break;
+					}
+				}
+				else if(strcmp(opcode,"lokey")==0)
+				{
+					switch(currentNode)
+					{
+						case 'g': current_group.lokey=strtomidi(value); break;
+						case 'r': current_region.lokey=strtomidi(value); break;
+					}
+				}
+				else if(strcmp(opcode,"hikey")==0)
+				{
+					switch(currentNode)
+					{
+						case 'g': current_group.hikey=strtomidi(value); break;
+						case 'r': current_region.hikey=strtomidi(value); break;
 					}
 				}
 				else if(strcmp(opcode,"lovel")==0)
@@ -521,12 +743,12 @@ void loadsfz(char *filename)
                                         }
 				}
 				else if(strcmp(opcode,"hirand")==0)
-                                {
-				        switch(currentNode)
-                                        {
-                                                case 'g': current_group.hirand=strtof(value,NULL); break;
-                                                case 'r': current_region.hirand=strtof(value,NULL); break;
-                                        }
+                {
+				    switch(currentNode)
+                    {
+						case 'g': current_group.hirand=strtof(value,NULL); break;
+						case 'r': current_region.hirand=strtof(value,NULL); break;
+                    }
 				}
 				else if(strcmp(opcode,"group")==0)
 				{
@@ -583,6 +805,7 @@ void loadsfz(char *filename)
 					strcpy(current_region.sample,path);
 					strcat(current_region.sample,"/");
 					strcat(current_region.sample,value);
+					//printf("Sample :%s",current_region.sample);
 					for(int i=0;i<strlen(current_region.sample);i++) if(current_region.sample[i]=='\\') current_region.sample[i]='/';
 				}
 			}
@@ -606,12 +829,31 @@ void* thread_test(void* arg)
 		if(run)
 		{
 			noteOn(n,v);
-			printf("test(%i,%i)\n",n,v);
+			printf("midiOn(%i,%i)\n",n,v);
 			v=(v+2)%127;
 		}
 	}
 
 	return NULL;
+}
+
+//==============================================================================
+//   RTMIDI
+//==============================================================================
+
+  
+void midi_callback(double timeStamp, const unsigned char* message,
+                                 size_t messageSize, void *userData)
+{
+	switch (message[0] & 0xf0)
+              {
+                case 0x90: noteOn(message[1],message[2]);
+                           break;
+                case 0x80: //synth.add_event_note_off (in_event.time, channel, in_event.buffer[1]);
+                           break;
+                case 0xb0: midiCC(message[1],message[2]); 
+                           break;
+              }
 }
 
 //==============================================================================
@@ -624,6 +866,20 @@ void exit_cli(int sig)
 }
 
 //==============================================================================
+//   PRINTHELP
+//==============================================================================
+void printhelp()
+{
+	printf("Usage: sfemtoz [tvhu] file.sfz \n");
+	printf("Options:\n");
+	printf("\tv: verbose mode\n");
+	printf("\th: show this help\n");
+	printf("\tu: use USB path\n");
+	printf("\tt note: test note\n");
+	printf("\n\n");
+}
+
+//==============================================================================
 //   MAIN
 //==============================================================================
 int main(int argc,char **argv)
@@ -633,26 +889,83 @@ int main(int argc,char **argv)
 	printf("SFemtoZ!\n");
 
 	int c;
-	while ((c = getopt (argc, argv, "t:v")) != -1)
+	while ((c = getopt (argc, argv, "t:vhubjm")) != -1)
     		switch (c)
 		{
-			case 't':
+			case 't': //testnote optarg=midinote
 				if(pthread_create(&test,NULL,thread_test,optarg))
 				{
 					printf("error thread test\n");
 				}
 			break;
 
-			case 'v':
+			case 'v': //verbose mode
 				verbose=TRUE;
 			break;
+
+			case 'h': //print help
+				printhelp();
+				return 0;
+			break;
+
+			case 'u': //use usb path
+				useusb=TRUE;
+			break;
+
+			case 'b'://select backend
+				backend=TRUE;
+			break;
+			
+			/*case 'j'://start jack
+				if(client==NULL) client = jack_client_open ("SFemtoZ!", JackNullOption, NULL);
+			break;*/
+			
+			case 'm'://midi
+				
+				 midiin=rtmidi_in_create_default();
+				 int port_count=rtmidi_get_port_count(midiin);
+				 printf("MIDI Port Count: %i\n",port_count);
+				 
+				  for (int i = 0; i < port_count; i ++) 
+				  {
+					  printf("%i) %s \n",i,rtmidi_get_port_name(midiin,i));
+				  }
+				  
+				  rtmidi_open_port (midiin, 1, "test");
+				  rtmidi_in_set_callback (midiin,&midi_callback,0);
+			break;
+
+			case '?':
+				if (optopt == 't')
+          				fprintf (stderr, "Option -%c requires MIDI Note.\n", optopt);
+        			else if (isprint (optopt))
+          				fprintf (stderr, "Unknown option `-%c'.\n", optopt);
+        			else
+          				fprintf (stderr,
+                   			"Unknown option character `\\x%x'.\n",
+                   			optopt);
+        			return 1;
+			default:
+				abort();
 
 
 		}
 
+	if(optind>=argc)
+	{
+		printhelp();
+		return 0;
+	}
+
 	char sfzfile[50];
-	strcpy(sfzfile,USBPATH);
-	strcat(sfzfile,argv[optind]);
+	if(useusb)
+	{	
+		strcpy(sfzfile,USBPATH);
+		strcat(sfzfile,argv[optind]);
+	}
+	else
+		strcpy(sfzfile,argv[optind]);
+
 	printf("Load SFZ: %s\n",sfzfile);
 	loadsfz(sfzfile);
 	//printsfz();
@@ -696,6 +1009,9 @@ int main(int argc,char **argv)
 	soundio_destroy(soundio);
 
 	serialClose(fd);
+	
+	//if(client!=NULL) jack_client_close (client);
+	if(midiin!=NULL) rtmidi_in_free(midiin);
 
 	freesounds();
 	freesfz();
